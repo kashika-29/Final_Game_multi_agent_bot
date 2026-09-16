@@ -1399,7 +1399,7 @@ def pause_speech():
     """Pause the currently playing speech"""
     js_code = """
     <script>
-    if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
+    if ('speechSynthesis' in window) {
         window.speechSynthesis.pause();
     }
     </script>
@@ -1411,7 +1411,7 @@ def resume_speech():
     """Resume the currently paused speech"""
     js_code = """
     <script>
-    if ('speechSynthesis' in window && window.speechSynthesis.paused) {
+    if ('speechSynthesis' in window) {
         window.speechSynthesis.resume();
     }
     </script>
