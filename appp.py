@@ -7,6 +7,7 @@ from datetime import datetime
 import streamlit as st
 import os
 import json
+import re
 from typing import TypedDict, Annotated, Sequence, List, Dict, Any
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import letter
@@ -1017,6 +1018,131 @@ def get_con_rebuttal(topic: str, round_num: int) -> str:
         return f"Error generating Con rebuttal: {str(e)}"
 
 
+# ---------------------------------------------------------------------------
+# Judge response parsing helpers
+# The Judge LLM may return the same sections with slightly different formatting
+# (missing colons, bold/heading markers, numbered or plain lines, unicode
+# dashes/quotes), so each section is extracted without depending on the exact
+# layout the model chose.
+# ---------------------------------------------------------------------------
+_JUDGE_SECTION_PATTERNS = {
+    'winner': r'winner',
+    'pro_strengths': r"pro[ \t]*strengths",
+    'con_strengths': r"con[ \t]*strengths",
+    'best_argument': r'best[ \t]*argument',
+    'best_rebuttal': r'best[ \t]*rebuttal',
+    'final_reasoning': r'final[ \t]*reasoning',
+}
+_JUDGE_BULLET_RE = re.compile(r'^[-*•●‣·▪+–—]\s*')
+_JUDGE_NUMBER_RE = re.compile(r'^\d{1,2}[\.\)]\s*')
+
+# Exact section outlines used when the Judge's first answer was cut off or empty
+_JUDGE_RETRY_FORMATS = {
+    'pro_strengths': 'Pro Strengths:\n- [strength]\n- [strength]\n- [strength]',
+    'con_strengths': 'Con Strengths:\n- [strength]\n- [strength]\n- [strength]',
+    'best_argument': 'Best Argument: "[exact quote from the transcript]"',
+    'best_rebuttal': 'Best Rebuttal: "[exact quote from the transcript]"',
+    'final_reasoning': 'Final Reasoning: [one or two sentences explaining the verdict]',
+}
+
+
+def _normalize_judge_text(text: str) -> str:
+    """Normalize unicode and markdown noise so the Judge output can be parsed reliably."""
+    if not text:
+        return ""
+    text = text.replace('\u2011', '-').replace('\u2010', '-')
+    text = text.replace('\u00a0', ' ').replace('\u202f', ' ').replace('\u2009', ' ')
+    text = text.replace('\u2018', "'").replace('\u2019', "'")
+    text = text.replace('\u201c', '"').replace('\u201d', '"')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    return text.replace('**', '')
+
+
+def _find_judge_headers(text: str) -> List[tuple]:
+    """Return every recognized section header in the text as (start, end, section)."""
+    found = []
+    for section, pattern in _JUDGE_SECTION_PATTERNS.items():
+        header_re = re.compile(
+            r'^[ \t]*(?:[-*•●‣·▪][ \t]*)?(?:#{1,6}[ \t]*)?(?:\*\*|__)?[ \t]*'
+            + pattern
+            + r'[ \t]*(?:\*\*|__)?[ \t]*[:\-–—]?[ \t]*',
+            re.I | re.M)
+        for match in header_re.finditer(text):
+            # Avoid duplicate matches at the same position - keep the first one found
+            if not any(f[0] == match.start() for f in found):
+                found.append((match.start(), match.end(), section))
+    found.sort()
+    return found
+
+
+def _judge_section_text(text: str, section: str) -> str:
+    """Return the raw body that follows a section header (until the next header)."""
+    headers = _find_judge_headers(text)
+    for index, (_start, end, key) in enumerate(headers):
+        if key == section:
+            stop = headers[index + 1][0] if index + 1 < len(headers) else len(text)
+            return text[end:stop].strip()
+    return ''
+
+
+def _strip_judge_wrapping(value: str) -> str:
+    """Remove surrounding quotes, emphasis and [quote] markers from a Judge value."""
+    value = re.sub(r'\*\*|__', '', value.strip()).strip()
+    quotes = '"\'\u201c\u201d\u2018\u2019`'
+    for _ in range(3):
+        value = value.strip(quotes).strip()
+        stripped = re.sub(r'^\[\s*quote\s*\]', '', value, flags=re.I)
+        stripped = re.sub(r'\[\s*/\s*quote\s*\]$', '', stripped, flags=re.I).strip()
+        if stripped == value:
+            break
+        value = stripped
+    return value
+
+
+def _clean_judge_list(value: str) -> List[str]:
+    """Turn a strengths section into a list of items (bulleted, numbered or plain lines)."""
+    lines = [line.strip() for line in value.split('\n') if line.strip()]
+    if not lines:
+        return []
+    first_marked = bool(_JUDGE_BULLET_RE.match(lines[0]) or _JUDGE_NUMBER_RE.match(lines[0]))
+    items = []
+    for line in lines:
+        marked = bool(_JUDGE_BULLET_RE.match(line) or _JUDGE_NUMBER_RE.match(line))
+        text = _JUDGE_NUMBER_RE.sub('', _JUDGE_BULLET_RE.sub('', line)).strip()
+        if not items or marked or not first_marked:
+            items.append(_strip_judge_wrapping(text))
+        else:
+            items[-1] = (items[-1] + ' ' + text).strip()
+    return [item for item in items if item]
+
+
+def _clean_judge_quote(value: str) -> str:
+    """Flatten a multi-line quote section into a single line."""
+    value = ' '.join(line.strip() for line in value.split('\n') if line.strip())
+    return _strip_judge_wrapping(value)
+
+
+def _parse_judge_response(raw_text: str) -> Dict[str, str]:
+    """Extract every section of the Judge's response, tolerating formatting differences."""
+    text = _normalize_judge_text(raw_text)
+    parsed: Dict[str, str] = {}
+    winner = _judge_section_text(text, 'winner')
+    if winner:
+        parsed['winner'] = ' '.join(winner.split('\n')[0].split())
+    for section in ('pro_strengths', 'con_strengths'):
+        items = _clean_judge_list(_judge_section_text(text, section))
+        if items:
+            parsed[section] = '\n'.join([f"- {item}" for item in items])
+    for section in ('best_argument', 'best_rebuttal'):
+        value = _clean_judge_quote(_judge_section_text(text, section))
+        if value:
+            parsed[section] = value
+    reasoning = _judge_section_text(text, 'final_reasoning')
+    if reasoning:
+        parsed['final_reasoning'] = reasoning
+    return parsed
+
+
 def get_judge_verdict() -> Dict[str, str]:
     """Get judge's verdict using Groq"""
     try:
@@ -1089,76 +1215,71 @@ IMPORTANT: Only identify strengths, arguments, and rebuttals that ACTUALLY appea
             'final_reasoning': verdict_text
         }
         
-        # Parse Winner (case-insensitive)
-        lines = verdict_text.split('\n')
-        for i, line in enumerate(lines):
-            if 'winner:' in line.lower():
-                winner_text = line.split(':', 1)[1].strip() if ':' in line else ''
-                # Get next lines if winner spans multiple lines
-                j = i + 1
-                while j < len(lines) and lines[j].strip() and not any(marker.lower() in lines[j].lower() for marker in ['pro strengths', 'con strengths', 'best argument', 'best rebuttal', 'final reasoning']):
-                    winner_text += ' ' + lines[j].strip()
-                    j += 1
-                if winner_text:
-                    verdict['winner'] = winner_text
-                break
+        # Parse the Judge's response with a layout-tolerant parser (all sections at once)
+        parsed_verdict = _parse_judge_response(verdict_text)
+        parsed_sections = [key for key in ('winner', 'pro_strengths', 'con_strengths', 'best_argument', 'best_rebuttal', 'final_reasoning') if parsed_verdict.get(key)]
+        print(f"DEBUG: Parsed Judge sections: {parsed_sections}")
+
+        if parsed_verdict.get('winner'):
+            verdict['winner'] = parsed_verdict['winner']
+        if parsed_verdict.get('pro_strengths'):
+            verdict['pro_strengths'] = parsed_verdict['pro_strengths']
+        if parsed_verdict.get('con_strengths'):
+            verdict['con_strengths'] = parsed_verdict['con_strengths']
+        if parsed_verdict.get('best_argument'):
+            verdict['best_argument'] = parsed_verdict['best_argument']
+        if parsed_verdict.get('best_rebuttal'):
+            verdict['best_rebuttal'] = parsed_verdict['best_rebuttal']
+        if parsed_verdict.get('final_reasoning'):
+            verdict['final_reasoning'] = parsed_verdict['final_reasoning']
+
+        # If the Judge's answer was cut off or empty, ask once more for ONLY the missing
+        # sections (the follow-up still analyzes the same real transcript)
+        missing_sections = [key for key in ('pro_strengths', 'con_strengths', 'best_argument', 'best_rebuttal')
+                            if verdict.get(key, 'Not specified') == 'Not specified']
+        if not verdict_text.strip():
+            # the Judge returned nothing at all - ask for the reasoning as well
+            missing_sections.append('final_reasoning')
+        if missing_sections:
+            print(f"DEBUG: Judge response incomplete - requesting missing sections: {missing_sections}")
+            try:
+                retry_messages = messages + [
+                    AIMessage(content=verdict_text or "(no response)"),
+                    HumanMessage(content=(
+                        "Your previous answer was incomplete or empty. Using ONLY the debate transcript "
+                        "above, answer again without any analysis or explanation. Reply with ONLY these "
+                        "sections, in this exact format:\n\n"
+                        + "\n".join(_JUDGE_RETRY_FORMATS[key] for key in missing_sections)))
+                ]
+                retry_text = judge_agent.invoke({"messages": retry_messages}).content or ""
+                print(f"DEBUG: RAW Judge Retry Response:\n{retry_text}")
+                retry_parsed = _parse_judge_response(retry_text)
+                for key in missing_sections:
+                    if retry_parsed.get(key):
+                        verdict[key] = retry_parsed[key]
+                        print(f"DEBUG: Filled '{key}' from Judge retry response")
+            except Exception as retry_error:
+                print(f"DEBUG: Judge retry failed: {retry_error}")
         
-        # Parse Pro Strengths (case-insensitive)
-        for i, line in enumerate(lines):
-            if 'pro strengths' in line.lower():
-                strengths = []
-                j = i + 1
-                while j < len(lines) and (lines[j].strip().startswith('-') or lines[j].strip().startswith('*') or lines[j].strip().startswith('•')):
-                    strengths.append(lines[j].strip().lstrip('-*•').strip())
-                    j += 1
-                if strengths:
-                    verdict['pro_strengths'] = '\n'.join([f"- {s}" for s in strengths])
-                break
+        # Fallback for Best Argument: if the Judge still did not name one, use the strongest
+        # argument that actually appears in the transcript (mirrors the Best Rebuttal fallback)
+        if verdict.get('best_argument', 'Not specified') == 'Not specified':
+            print("DEBUG: Best Argument NOT found in Judge response")
+            transcript_messages = [msg for msg in st.session_state.messages if msg.content]
+            if transcript_messages:
+                winner_side = 'Pro' if 'Pro' in verdict.get('winner', '') else ('Con' if 'Con' in verdict.get('winner', '') else None)
+                if winner_side:
+                    side_messages = [msg for msg in transcript_messages if getattr(msg, 'name', '') == winner_side]
+                    if side_messages:
+                        transcript_messages = side_messages
+                best_msg = max(transcript_messages, key=lambda msg: len(msg.content))
+                verdict['best_argument'] = best_msg.content[:300] + "..." if len(best_msg.content) > 300 else best_msg.content
+                print(f"DEBUG: Using fallback best_argument from transcript: {verdict['best_argument']}")
         
-        # Parse Con Strengths (case-insensitive)
-        for i, line in enumerate(lines):
-            if 'con strengths' in line.lower():
-                strengths = []
-                j = i + 1
-                while j < len(lines) and (lines[j].strip().startswith('-') or lines[j].strip().startswith('*') or lines[j].strip().startswith('•')):
-                    strengths.append(lines[j].strip().lstrip('-*•').strip())
-                    j += 1
-                if strengths:
-                    verdict['con_strengths'] = '\n'.join([f"- {s}" for s in strengths])
-                break
-        
-        # Parse Best Argument (case-insensitive)
-        for i, line in enumerate(lines):
-            if 'best argument' in line.lower():
-                arg_text = line.split(':', 1)[1].strip() if ':' in line else ''
-                # Remove quotes if present
-                arg_text = arg_text.strip('"\'')
-                # Get next lines if argument spans multiple lines
-                j = i + 1
-                while j < len(lines) and lines[j].strip() and not any(marker.lower() in lines[j].lower() for marker in ['best rebuttal', 'final reasoning']):
-                    arg_text += ' ' + lines[j].strip()
-                    j += 1
-                if arg_text:
-                    verdict['best_argument'] = arg_text.strip('"\'')
-                break
-        
-        # Parse Best Rebuttal (case-insensitive)
-        for i, line in enumerate(lines):
-            if 'best rebuttal' in line.lower():
-                rebuttal_text = line.split(':', 1)[1].strip() if ':' in line else ''
-                # Remove quotes if present
-                rebuttal_text = rebuttal_text.strip('"\'')
-                # Get next lines if rebuttal spans multiple lines
-                j = i + 1
-                while j < len(lines) and lines[j].strip() and 'final reasoning' not in lines[j].lower():
-                    rebuttal_text += ' ' + lines[j].strip()
-                    j += 1
-                if rebuttal_text:
-                    verdict['best_rebuttal'] = rebuttal_text.strip('"\'')
-                    print(f"DEBUG: Parsed best_rebuttal from Judge response: {verdict['best_rebuttal']}")
-                else:
-                    print("DEBUG: Best Rebuttal header found but content is empty")
-                break
+        # Report the Best Rebuttal from the Judge's response, keeping the existing fallback
+        # to the last transcript message when the Judge did not provide one
+        if verdict.get('best_rebuttal', 'Not specified') != 'Not specified':
+            print(f"DEBUG: Parsed best_rebuttal from Judge response: {verdict['best_rebuttal']}")
         else:
             print("DEBUG: Best Rebuttal header NOT found in Judge response")
             # Fallback: Try to extract from the last argument that directly responds to opponent
@@ -1171,17 +1292,7 @@ IMPORTANT: Only identify strengths, arguments, and rebuttals that ACTUALLY appea
             else:
                 print("DEBUG: No messages available for fallback")
         
-        # Parse Final Reasoning (case-insensitive)
-        for i, line in enumerate(lines):
-            if 'final reasoning' in line.lower():
-                reasoning = line.split(':', 1)[1].strip() if ':' in line else ''
-                j = i + 1
-                while j < len(lines):
-                    reasoning += '\n' + lines[j]
-                    j += 1
-                if reasoning:
-                    verdict['final_reasoning'] = reasoning.strip()
-                break
+        # Final Reasoning comes from the parsed Judge response above (the raw response is the fallback)
         
         # For Human vs AI mode, convert Pro/Con to Human/AI labels (AFTER parsing)
         if game_mode == 'human_vs_ai':
