@@ -5,6 +5,7 @@ AI-powered debate arena with LangGraph, Groq, and Tavily
 import random
 from datetime import datetime
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import json
 import re
@@ -777,6 +778,12 @@ def initialize_session_state():
     if 'theme' not in st.session_state:
         st.session_state.theme = theme_manager.load_preference()
     
+    if 'voice_enabled' not in st.session_state:
+        st.session_state.voice_enabled = True
+    
+    if 'last_spoken_message_index' not in st.session_state:
+        st.session_state.last_spoken_message_index = -1
+    
     if 'show_citations' not in st.session_state:
         st.session_state.show_citations = True
     
@@ -1365,6 +1372,65 @@ def search_tavily(query: str) -> List[Dict[str, Any]]:
         return []
 
 
+def speak_text(text: str):
+    """Use browser's Web Speech API to speak text"""
+    if not st.session_state.get('voice_enabled', True):
+        return
+    
+    # Escape text for JavaScript
+    escaped_text = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '')
+    
+    js_code = f"""
+    <script>
+    if ('speechSynthesis' in window) {{
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance("{escaped_text}");
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        window.speechSynthesis.speak(utterance);
+    }}
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+
+def pause_speech():
+    """Pause the currently playing speech"""
+    js_code = """
+    <script>
+    if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+    }
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+
+def resume_speech():
+    """Resume the currently paused speech"""
+    js_code = """
+    <script>
+    if ('speechSynthesis' in window && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+    }
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+
+def stop_speech():
+    """Stop/cancel the currently playing speech"""
+    js_code = """
+    <script>
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+    }
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+
 def simulate_pro_turn():
     """Simulate Pro agent's turn with streaming"""
     topic = st.session_state.topic
@@ -1417,6 +1483,13 @@ def simulate_pro_turn():
     con_change = random.uniform(-10, 5)
     st.session_state.pro_score = max(0, min(100, st.session_state.pro_score + pro_change))
     st.session_state.con_score = max(0, min(100, st.session_state.con_score + con_change))
+    
+    # Speak the argument if voice is enabled and this is a new message
+    if st.session_state.get('voice_enabled', True):
+        current_message_index = len(st.session_state.messages) - 1
+        if current_message_index > st.session_state.get('last_spoken_message_index', -1):
+            st.session_state.last_spoken_message_index = current_message_index
+            speak_text(full_response)
 
 
 def simulate_con_turn():
@@ -1471,6 +1544,13 @@ def simulate_con_turn():
     con_change = random.uniform(-5, 10)
     st.session_state.pro_score = max(0, min(100, st.session_state.pro_score + pro_change))
     st.session_state.con_score = max(0, min(100, st.session_state.con_score + con_change))
+    
+    # Speak the argument if voice is enabled and this is a new message
+    if st.session_state.get('voice_enabled', True):
+        current_message_index = len(st.session_state.messages) - 1
+        if current_message_index > st.session_state.get('last_spoken_message_index', -1):
+            st.session_state.last_spoken_message_index = current_message_index
+            speak_text(full_response)
     
     # Fetch citations for the round after both agents have spoken
     if st.session_state.show_citations:
@@ -2342,11 +2422,31 @@ def render_ai_vs_ai():
                         st.session_state.current_round = st.session_state.num_rounds
                     st.rerun()
             
-            # Automate button
+            # Voice controls row
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🤖 Automate Arguments", key="automate_ai_vs_ai", use_container_width=True):
-                st.session_state.automating = True
-                st.rerun()
+            col_auto, col_voice = st.columns([2, 1])
+            
+            with col_auto:
+                if st.button("🤖 Automate Arguments", key="automate_ai_vs_ai", use_container_width=True):
+                    st.session_state.automating = True
+                    st.rerun()
+            
+            with col_voice:
+                voice_enabled = st.checkbox("🔊 Voice", value=st.session_state.get('voice_enabled', True), key="ai_vs_ai_voice_toggle")
+                st.session_state.voice_enabled = voice_enabled
+            
+            # Playback controls (compact row below voice)
+            if st.session_state.get('voice_enabled', True):
+                col_pause, col_resume, col_stop = st.columns([1, 1, 1])
+                with col_pause:
+                    if st.button("⏸ Pause", key="pause_speech", use_container_width=True):
+                        pause_speech()
+                with col_resume:
+                    if st.button("▶️ Resume", key="resume_speech", use_container_width=True):
+                        resume_speech()
+                with col_stop:
+                    if st.button("⏹ Stop", key="stop_speech", use_container_width=True):
+                        stop_speech()
             
             # Automation logic
             if st.session_state.get('automating', False) and st.session_state.debate_active:
