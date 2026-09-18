@@ -3,7 +3,7 @@ DebateBot: Two Sides and a Judge
 AI-powered debate arena with LangGraph, Groq, and Tavily
 """
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import streamlit as st
 import streamlit.components.v1 as components
 import os
@@ -40,6 +40,69 @@ if not GROQ_API_KEY:
 if not TAVILY_API_KEY:
     st.error("TAVILY_API_KEY not found in environment variables. Please set it in .env file.")
     st.stop()
+
+
+# ============================================================================
+# SURPRISE ME TOPICS
+# ============================================================================
+
+SURPRISE_TOPICS = [
+    # Technology & AI
+    "Should artificial intelligence be allowed to replace human teachers?",
+    "Should social media companies be held responsible for user content?",
+    "Should smartphones be banned in schools?",
+    "Should autonomous vehicles be allowed on public roads?",
+    "Should governments regulate AI development?",
+    
+    # Education
+    "Should homework be abolished in schools?",
+    "Should college education be free for everyone?",
+    "Should standardized testing be eliminated?",
+    "Should students choose their own subjects?",
+    "Should schools teach financial literacy as a mandatory subject?",
+    
+    # Environment
+    "Should single-use plastics be completely banned?",
+    "Should nuclear energy be used to combat climate change?",
+    "Should electric vehicles be mandatory by 2030?",
+    "Should companies be taxed for their carbon footprint?",
+    "Should vegetarian diets be promoted to reduce environmental impact?",
+    
+    # Science & Health
+    "Should genetic engineering be allowed in humans?",
+    "Should vaccination be mandatory for all children?",
+    "Should animal testing be banned for medical research?",
+    "Should sugar be taxed like tobacco?",
+    "Should mental health education be mandatory in schools?",
+    
+    # Society & Ethics
+    "Should universal basic income be implemented?",
+    "Should voting be mandatory for all citizens?",
+    "Should the death penalty be abolished worldwide?",
+    "Should prisoners be allowed to vote?",
+    "Should there be a maximum limit on personal wealth?",
+    
+    # Career & Work
+    "Should remote work become the standard for all jobs?",
+    "Should the work week be reduced to 4 days?",
+    "Should unpaid internships be illegal?",
+    "Should retirement age be increased?",
+    "Should gig workers be classified as employees?",
+    
+    # Entertainment & Media
+    "Should violent video games be restricted for minors?",
+    "Should streaming services pay artists more fairly?",
+    "Should celebrities be held to higher moral standards?",
+    "Should reality TV be regulated for authenticity?",
+    "Should movie theaters survive in the streaming era?",
+    
+    # Everyday Life
+    "Should cash be eliminated in favor of digital payments only?",
+    "Should daylight saving time be abolished?",
+    "Should tipping be replaced by fair wages?",
+    "Should public transportation be free?",
+    "Should cities ban cars in favor of public transit?",
+]
 
 
 # ============================================================================
@@ -784,6 +847,18 @@ def initialize_session_state():
     if 'last_spoken_message_index' not in st.session_state:
         st.session_state.last_spoken_message_index = -1
     
+    if 'human_pro_transcript' not in st.session_state:
+        st.session_state.human_pro_transcript = ''
+    
+    if 'human_con_transcript' not in st.session_state:
+        st.session_state.human_con_transcript = ''
+    
+    if 'last_pro_transcript' not in st.session_state:
+        st.session_state.last_pro_transcript = ''
+    
+    if 'last_con_transcript' not in st.session_state:
+        st.session_state.last_con_transcript = ''
+    
     if 'show_citations' not in st.session_state:
         st.session_state.show_citations = True
     
@@ -837,6 +912,12 @@ def initialize_session_state():
     
     if 'automating' not in st.session_state:
         st.session_state.automating = False
+    
+    if 'show_streak_panel' not in st.session_state:
+        st.session_state.show_streak_panel = False
+    
+    if 'last_completed_debate_id' not in st.session_state:
+        st.session_state.last_completed_debate_id = None
 
 
 def reset_debate_state():
@@ -855,6 +936,268 @@ def reset_debate_state():
     st.session_state.con_spoken_this_round = False
     st.session_state.show_round_transcript = False
     st.session_state.show_leave_confirmation = False
+
+
+# ============================================================================
+# STREAK MANAGEMENT
+# ============================================================================
+
+def load_streak_data():
+    """Load streak data from file"""
+    streak_file = os.path.join('config', 'streak.json')
+    if os.path.exists(streak_file):
+        with open(streak_file, 'r') as f:
+            return json.load(f)
+    return {
+        'activity': {},  # date string -> count of completed debates
+        'current_streak': 0,
+        'longest_streak': 0,
+        'total_completed': 0
+    }
+
+
+def save_streak_data(streak_data):
+    """Save streak data to file"""
+    streak_file = os.path.join('config', 'streak.json')
+    os.makedirs('config', exist_ok=True)
+    with open(streak_file, 'w') as f:
+        json.dump(streak_data, f, indent=2)
+
+
+def record_debate_completion():
+    """Record a completed debate for streak tracking"""
+    streak_data = load_streak_data()
+    
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # Increment today's activity count
+    if today in streak_data['activity']:
+        streak_data['activity'][today] += 1
+    else:
+        streak_data['activity'][today] = 1
+    
+    # Recalculate streak
+    streak_data = calculate_streak(streak_data)
+    
+    # Update total completed
+    streak_data['total_completed'] += 1
+    
+    save_streak_data(streak_data)
+    return streak_data
+
+
+def calculate_streak(streak_data):
+    """Calculate current and longest streak from activity data"""
+    activity = streak_data.get('activity', {})
+    if not activity:
+        streak_data['current_streak'] = 0
+        streak_data['longest_streak'] = 0
+        return streak_data
+    
+    # Get sorted dates
+    dates = sorted(activity.keys())
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # Calculate current streak
+    current_streak = 0
+    check_date = datetime.now()
+    
+    for i in range(365):  # Check up to a year back
+        date_str = check_date.strftime('%Y-%m-%d')
+        if date_str in activity:
+            current_streak += 1
+            check_date -= timedelta(days=1)
+        else:
+            break
+    
+    streak_data['current_streak'] = current_streak
+    
+    # Calculate longest streak
+    longest_streak = 0
+    temp_streak = 0
+    prev_date = None
+    
+    for date_str in dates:
+        if prev_date is None:
+            temp_streak = 1
+        else:
+            curr = datetime.strptime(date_str, '%Y-%m-%d')
+            prev = datetime.strptime(prev_date, '%Y-%m-%d')
+            diff = (curr - prev).days
+            
+            if diff == 1:
+                temp_streak += 1
+            else:
+                longest_streak = max(longest_streak, temp_streak)
+                temp_streak = 1
+        
+        prev_date = date_str
+    
+    longest_streak = max(longest_streak, temp_streak)
+    streak_data['longest_streak'] = longest_streak
+    
+    return streak_data
+
+
+def render_streak_indicator():
+    """Render compact streak indicator in header"""
+    streak_data = load_streak_data()
+    current_streak = streak_data.get('current_streak', 0)
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button(f"🔥 {current_streak} day streak", key="streak_indicator", help="View your debate activity"):
+            st.session_state.current_page = 'streak'
+            st.rerun()
+
+
+def render_streak_panel():
+    """Render activity/streak panel with heatmap (deprecated - use render_streak_page instead)"""
+    pass
+
+
+def render_streak_page():
+    """Render dedicated streak page with heatmap"""
+    streak_data = load_streak_data()
+    activity = streak_data.get('activity', {})
+    current_streak = streak_data.get('current_streak', 0)
+    longest_streak = streak_data.get('longest_streak', 0)
+    total_completed = streak_data.get('total_completed', 0)
+    
+    st.markdown("""
+    <div style="text-align: center; padding: 30px 20px;">
+        <h1 style="color: var(--theme-gold); font-size: 42px; margin-bottom: 10px;">🔥 Debate Streak</h1>
+        <p style="color: var(--theme-text-light); font-size: 16px;">Your debate activity over time</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Stats row
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+        <div style="text-align: center; background: var(--theme-card-bg); border: 2px solid var(--theme-gold); border-radius: 15px; padding: 25px;">
+            <div style="color: var(--theme-gold); font-size: 42px; font-weight: bold;">{current_streak}</div>
+            <div style="color: var(--theme-text); font-size: 16px; margin-top: 10px;">Current Streak</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div style="text-align: center; background: var(--theme-card-bg); border: 2px solid var(--theme-gold); border-radius: 15px; padding: 25px;">
+            <div style="color: var(--theme-gold); font-size: 42px; font-weight: bold;">{longest_streak}</div>
+            <div style="color: var(--theme-text); font-size: 16px; margin-top: 10px;">Longest Streak</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div style="text-align: center; background: var(--theme-card-bg); border: 2px solid var(--theme-gold); border-radius: 15px; padding: 25px;">
+            <div style="color: var(--theme-gold); font-size: 42px; font-weight: bold;">{total_completed}</div>
+            <div style="color: var(--theme-text); font-size: 16px; margin-top: 10px;">Total Debates</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Generate heatmap for last 12 months
+    st.markdown("<h3 style='color: var(--theme-text); margin: 20px 0 15px 0;'>Activity Heatmap (Last 12 Months)</h3>", unsafe_allow_html=True)
+    
+    # Generate heatmap HTML
+    heatmap_html = generate_heatmap_html(activity)
+    st.components.v1.html(heatmap_html, height=200)
+    
+    # Legend
+    st.markdown("""
+    <div style="display: flex; align-items: center; gap: 10px; margin-top: 15px;">
+        <span style="color: var(--theme-text-light); font-size: 12px;">Less</span>
+        <div style="width: 12px; height: 12px; background: #1a1a1a; border: 1px solid #333; border-radius: 2px;"></div>
+        <div style="width: 12px; height: 12px; background: #0e4429; border-radius: 2px;"></div>
+        <div style="width: 12px; height: 12px; background: #006d32; border-radius: 2px;"></div>
+        <div style="width: 12px; height: 12px; background: #26a641; border-radius: 2px;"></div>
+        <div style="width: 12px; height: 12px; background: #39d353; border-radius: 2px;"></div>
+        <span style="color: var(--theme-text-light); font-size: 12px;">More</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Back button
+    if st.button("← Back to Dashboard", key="back_to_dashboard_streak", use_container_width=True, type="primary"):
+        st.session_state.current_page = 'lobby'
+        st.rerun()
+
+
+def generate_heatmap_html(activity):
+    """Generate GitHub-style heatmap HTML"""
+    from datetime import datetime, timedelta
+    
+    # Get date range (last 52 weeks)
+    end_date = datetime.now()
+    start_date = end_date - timedelta(weeks=52)
+    
+    # Create grid (7 days x 52 weeks)
+    weeks = []
+    current_date = start_date
+    
+    # Adjust to Sunday
+    current_date = current_date - timedelta(days=current_date.weekday() + 1)
+    
+    for week in range(52):
+        week_days = []
+        for day in range(7):
+            date_str = current_date.strftime('%Y-%m-%d')
+            count = activity.get(date_str, 0)
+            
+            # Determine color based on count
+            if count == 0:
+                color = '#1a1a1a'
+                border = '#333'
+            elif count == 1:
+                color = '#0e4429'
+                border = '#0e4429'
+            elif count == 2:
+                color = '#006d32'
+                border = '#006d32'
+            elif count == 3:
+                color = '#26a641'
+                border = '#26a641'
+            else:
+                color = '#39d353'
+                border = '#39d353'
+            
+            week_days.append({
+                'date': date_str,
+                'count': count,
+                'color': color,
+                'border': border
+            })
+            current_date += timedelta(days=1)
+        
+        weeks.append(week_days)
+    
+    # Generate HTML
+    html = """
+    <div style="overflow-x: auto; padding: 10px 0;">
+        <div style="display: flex; gap: 3px;">
+    """
+    
+    for week in weeks:
+        html += '<div style="display: flex; flex-direction: column; gap: 3px;">'
+        for day in week:
+            html += f"""
+            <div style="width: 10px; height: 10px; background: {day['color']}; border: 1px solid {day['border']}; border-radius: 2px;" 
+                 title="{day['date']}: {day['count']} debate(s)"></div>
+            """
+        html += '</div>'
+    
+    html += """
+        </div>
+    </div>
+    """
+    
+    return html
 
 
 # ============================================================================
@@ -1431,6 +1774,110 @@ def stop_speech():
     st.components.v1.html(js_code, height=0)
 
 
+def start_speech_recognition(text_input_key: str):
+    """Start browser speech recognition and update text input with transcript"""
+    js_code = f"""
+    <script>
+    (function() {{
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        
+        const statusDiv = document.getElementById('speech_status_{text_input_key}');
+        const errorDiv = document.getElementById('speech_error_{text_input_key}');
+        
+        if (!SpeechRecognition) {{
+            if (errorDiv) {{
+                errorDiv.textContent = 'Speech recognition is not supported in this browser. Please use Chrome or Edge.';
+                errorDiv.style.display = 'block';
+            }}
+            return;
+        }}
+        
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+        
+        recognition.onstart = function() {{
+            console.log('Speech recognition started');
+            if (statusDiv) {{
+                statusDiv.textContent = '🎙️ Listening...';
+                statusDiv.style.display = 'block';
+            }}
+            if (errorDiv) errorDiv.style.display = 'none';
+        }};
+        
+        recognition.onresult = function(event) {{
+            console.log('Speech recognition result received');
+            const transcript = event.results[0][0].transcript;
+            console.log('Transcript:', transcript);
+            
+            // Store in localStorage
+            localStorage.setItem('{text_input_key}_transcript', transcript);
+            
+            // Reload page to trigger Streamlit rerun
+            setTimeout(function() {{
+                window.location.reload();
+            }}, 500);
+            
+            if (statusDiv) {{
+                statusDiv.textContent = '✅ Speech captured';
+            }}
+        }};
+        
+        recognition.onerror = function(event) {{
+            console.error('Speech recognition error:', event.error);
+            if (statusDiv) statusDiv.style.display = 'none';
+            if (errorDiv) {{
+                errorDiv.textContent = '🎙️ Speech recognition error: ' + event.error;
+                errorDiv.style.display = 'block';
+            }}
+        }};
+        
+        recognition.onend = function() {{
+            console.log('Speech recognition ended');
+            if (statusDiv && statusDiv.textContent === '🎙️ Listening...') {{
+                statusDiv.style.display = 'none';
+            }}
+        }};
+        
+        recognition.start();
+    }})();
+    </script>
+    <div id="speech_status_{text_input_key}" style="display:none; color: #666; margin: 5px 0;"></div>
+    <div id="speech_error_{text_input_key}" style="display:none; color: #e74c3c; margin: 5px 0;"></div>
+    """
+    st.components.v1.html(js_code, height=80)
+
+
+def load_transcript_from_localstorage(text_input_key: str):
+    """Load transcript from localStorage and update hidden text input"""
+    js_code = f"""
+    <script>
+    (function() {{
+        const transcript = localStorage.getItem('{text_input_key}_transcript');
+        if (transcript) {{
+            console.log('Loading transcript from localStorage:', transcript);
+            // Find and update the text input by key
+            const textInputs = document.querySelectorAll('input[data-testid="stTextInput"]');
+            for (let input of textInputs) {{
+                const container = input.closest('[data-testid="stTextInput"]');
+                if (container && container.getAttribute('data-key') === '{text_input_key}') {{
+                    input.value = transcript;
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    console.log('Updated input value from localStorage:', transcript);
+                    break;
+                }}
+            }}
+            // Clear localStorage after loading
+            localStorage.removeItem('{text_input_key}_transcript');
+        }}
+    }})();
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+
 def simulate_pro_turn():
     """Simulate Pro agent's turn with streaming"""
     topic = st.session_state.topic
@@ -1664,6 +2111,11 @@ def render_scoreboard():
 
 def render_lobby():
     """Render game-style lobby with three main modes"""
+    # Streak indicator in header (navbar-like placement)
+    col_left, col_center, col_right = st.columns([1, 3, 1])
+    with col_right:
+        render_streak_indicator()
+    
     st.markdown("""
     <div class="lobby-entrance" style="text-align: center; padding: 40px 20px;">
         <div class="logo-pulse" style="margin-bottom: 20px;">
@@ -1681,7 +2133,7 @@ def render_lobby():
     """, unsafe_allow_html=True)
     
     # Game mode cards
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.markdown("""
@@ -1720,6 +2172,24 @@ def render_lobby():
         if st.button("🎮 Play", key="multiplayer", use_container_width=True, type="primary"):
             st.session_state.game_mode = 'multiplayer'
             st.session_state.current_page = 'multiplayer_lobby'
+            st.rerun()
+    
+    with col4:
+        st.markdown("""
+        <div class="gradient-card" style="text-align: center; margin: 20px 0;">
+            <div style="font-size: 48px; margin-bottom: 15px;">🎲</div>
+            <h3 style="color: var(--theme-warning); font-size: 24px; margin-bottom: 10px;">Surprise Me</h3>
+            <p style="color: var(--theme-text-light); font-size: 14px; margin-bottom: 20px;">Random topic and side for a quick debate</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🎮 Play", key="surprise_me", use_container_width=True, type="primary"):
+            # Random topic and side
+            st.session_state.topic = random.choice(SURPRISE_TOPICS)
+            st.session_state.user_side = random.choice(['pro', 'con'])
+            st.session_state.game_mode = 'human_vs_ai'
+            st.session_state.current_page = 'debate'
+            reset_debate_state()
+            st.session_state.debate_active = True
             st.rerun()
     
     st.markdown("---")
@@ -2493,12 +2963,30 @@ def render_human_vs_ai():
             if st.session_state.current_turn == 'pro' and not st.session_state.pro_spoken_this_round:
                 if user_side == 'pro':
                     # Human's turn as Pro
-                    user_argument = st.text_area("Your argument (Pro):", placeholder="Enter your argument...", key="human_pro_input", height=100)
+                    # Load transcript from localStorage if available
+                    load_transcript_from_localstorage("pro_transcript_input")
+                    # Hidden text input to capture transcript from JavaScript
+                    pro_transcript = st.text_input("", key="pro_transcript_input", label_visibility="collapsed")
+                    # Only update session state if transcript is new
+                    if pro_transcript and pro_transcript != st.session_state.last_pro_transcript:
+                        st.session_state.human_pro_transcript = pro_transcript
+                        st.session_state.last_pro_transcript = pro_transcript
+                    
+                    col_input, col_mic = st.columns([4, 1])
+                    with col_input:
+                        user_argument = st.text_area("Your argument (Pro):", placeholder="Enter your argument...", key="human_pro_input", value=st.session_state.get('human_pro_transcript', ''), height=100)
+                    with col_mic:
+                        st.write("")  # Spacer
+                        st.write("")  # Spacer
+                        if st.button("🎤", key="mic_pro", help="Speak your argument"):
+                            start_speech_recognition("pro_transcript_input")
                     if st.button("Submit Argument", key="submit_human_pro", use_container_width=True, type="primary"):
                         if user_argument and user_argument.strip():
                             st.session_state.messages.append(AIMessage(content=user_argument.strip(), name="Pro"))
                             st.session_state.pro_spoken_this_round = True
                             st.session_state.current_turn = 'con'
+                            st.session_state.human_pro_transcript = ""
+                            st.session_state.last_pro_transcript = ""
                             st.rerun()
                 else:
                     # AI's turn as Pro
@@ -2509,12 +2997,30 @@ def render_human_vs_ai():
             elif st.session_state.current_turn == 'con' and not st.session_state.con_spoken_this_round:
                 if user_side == 'con':
                     # Human's turn as Con
-                    user_argument = st.text_area("Your argument (Con):", placeholder="Enter your argument...", key="human_con_input", height=100)
+                    # Load transcript from localStorage if available
+                    load_transcript_from_localstorage("con_transcript_input")
+                    # Hidden text input to capture transcript from JavaScript
+                    con_transcript = st.text_input("", key="con_transcript_input", label_visibility="collapsed")
+                    # Only update session state if transcript is new
+                    if con_transcript and con_transcript != st.session_state.last_con_transcript:
+                        st.session_state.human_con_transcript = con_transcript
+                        st.session_state.last_con_transcript = con_transcript
+                    
+                    col_input, col_mic = st.columns([4, 1])
+                    with col_input:
+                        user_argument = st.text_area("Your argument (Con):", placeholder="Enter your argument...", key="human_con_input", value=st.session_state.get('human_con_transcript', ''), height=100)
+                    with col_mic:
+                        st.write("")  # Spacer
+                        st.write("")  # Spacer
+                        if st.button("🎤", key="mic_con", help="Speak your argument"):
+                            start_speech_recognition("con_transcript_input")
                     if st.button("Submit Argument", key="submit_human_con", use_container_width=True, type="primary"):
                         if user_argument and user_argument.strip():
                             st.session_state.messages.append(AIMessage(content=user_argument.strip(), name="Con"))
                             st.session_state.con_spoken_this_round = True
                             st.session_state.current_turn = 'pro'
+                            st.session_state.human_con_transcript = ""
+                            st.session_state.last_con_transcript = ""
                             st.rerun()
                 else:
                     # AI's turn as Con
@@ -2606,6 +3112,12 @@ def render_debate_arena():
 def render_verdict_page():
     """Render judge verdict page"""
     game_mode = st.session_state.get('game_mode', 'ai_vs_ai')
+    
+    # Record debate completion for streak (only once per debate)
+    debate_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if st.session_state.get('last_completed_debate_id') != debate_id:
+        record_debate_completion()
+        st.session_state.last_completed_debate_id = debate_id
     
     # Read from session state storage based on game mode
     if game_mode == 'ai_vs_ai' and 'ai_vs_ai_judge_result' in st.session_state:
@@ -2861,6 +3373,8 @@ def main():
         render_themes_page()
     elif current_page == 'help':
         render_help_page()
+    elif current_page == 'streak':
+        render_streak_page()
     else:
         st.session_state.current_page = 'lobby'
         render_lobby()
